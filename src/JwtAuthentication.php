@@ -38,12 +38,18 @@ use Closure;
 use DomainException;
 use InvalidArgumentException;
 use Exception;
-use Lcobucci\JWT\Builder;
-use Lcobucci\JWT\Parser;
-use Lcobucci\JWT\Token;
-use Lcobucci\JWT\Signature;
-use Lcobucci\JWT\Signer\Hmac\Sha256;
+use Lcobucci\Clock\SystemClock;
+use Lcobucci\JWT\Configuration;
 use Lcobucci\JWT\Signer\Hmac\Sha512;
+use Lcobucci\JWT\Signer\Key\InMemory;
+use Lcobucci\JWT\Validation\Constraint\IdentifiedBy;
+use Lcobucci\JWT\Validation\Constraint\IssuedBy;
+use Lcobucci\JWT\Validation\Constraint\PermittedFor;
+use Lcobucci\JWT\Validation\Constraint\RelatedTo;
+use Lcobucci\JWT\Validation\Constraint\SignedWith;
+use Lcobucci\JWT\Validation\Constraint\StrictValidAt;
+use Lcobucci\JWT\Validation\Constraint\LooseValidAt;
+use Lcobucci\JWT\Validation\RequiredConstraintsViolated;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Server\MiddlewareInterface;
@@ -60,488 +66,463 @@ use Tuupola\Middleware\JwtAuthentication\RuleInterface;
 
 final class JwtAuthentication implements MiddlewareInterface
 {
-    use DoublePassTrait;
+	use DoublePassTrait;
 
-    /**
-     * PSR-3 compliant logger.
-     * @var LoggerInterface|null
-     */
-    private $logger;
+	/**
+	 * PSR-3 compliant logger.
+	 * @var LoggerInterface|null
+	 */
+	private $logger;
 
-    /**
-     * Last error message.
-     * @var string
-     */
-    private $message;
+	/**
+	 * Last error message.
+	 * @var string
+	 */
+	private $message;
 
-    /**
-     * The rules stack.
-     * @var SplStack<RuleInterface>
-     */
-    private $rules;
+	/**
+	 * The rules stack.
+	 * @var SplStack<RuleInterface>
+	 */
+	private $rules;
 
-    /**
-     * Stores all the options passed to the middleware.
-     * @var mixed[]
-     */
-    private $options = [
-        "secure" => true,
-        "relaxed" => ["localhost", "127.0.0.1"],
-        "algorithm" => ["HS256", "HS512", "HS384"],
-        "header" => "Authorization",
-        "regexp" => "/Bearer\s+(.*)$/i",
-        "cookie" => "token",
-        "attribute" => "token",
-        "path" => "/",
-        "ignore" => null,
-        "before" => null,
-        "after" => null,
-        "error" => null
-    ];
+	/**
+	 * Stores all the options passed to the middleware.
+	 * @var mixed[]
+	 */
+	private $options = [
+		"secure" => true,
+		"relaxed" => ["localhost", "127.0.0.1"],
+		"algorithm" => ["HS256", "HS512", "HS384"],
+		"header" => "Authorization",
+		"regexp" => "/Bearer\s+(.*)$/i",
+		"cookie" => "token",
+		"attribute" => "token",
+		"path" => "/",
+		"ignore" => null,
+		"before" => null,
+		"after" => null,
+		"error" => null
+	];
 
-    /**
-     * @param mixed[] $options
-     */
-    public function __construct(array $options = [])
-    {
-        /* Setup stack for rules */
-        $this->rules = new \SplStack;
+	/**
+	 * @param mixed[] $options
+	 */
+	public function __construct(array $options = [])
+	{
+		/* Setup stack for rules */
+		$this->rules = new \SplStack;
 
-        /* Store passed in options overwriting any defaults. */
-        $this->hydrate($options);
+		/* Store passed in options overwriting any defaults. */
+		$this->hydrate($options);
 
-        /* If nothing was passed in options add default rules. */
-        /* This also means $options["rules"] overrides $options["path"] */
-        /* and $options["ignore"] */
-        if (!isset($options["rules"])) {
-            $this->rules->push(new RequestMethodRule([
-                "ignore" => ["OPTIONS"]
-            ]));
-            $this->rules->push(new RequestPathRule([
-                "path" => $this->options["path"],
-                "ignore" => $this->options["ignore"]
-            ]));
-        }
-    }
+		/* If nothing was passed in options add default rules. */
+		/* This also means $options["rules"] overrides $options["path"] */
+		/* and $options["ignore"] */
+		if (!isset($options["rules"])) {
+			$this->rules->push(new RequestMethodRule([
+				"ignore" => ["OPTIONS"]
+			]));
+			$this->rules->push(new RequestPathRule([
+				"path" => $this->options["path"],
+				"ignore" => $this->options["ignore"]
+			]));
+		}
+	}
 
-    /**
-     * Process a request in PSR-15 style and return a response.
-     */
-    public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
-    {
-        $scheme = $request->getUri()->getScheme();
-        $host = $request->getUri()->getHost();
+	/**
+	 * Process a request in PSR-15 style and return a response.
+	 */
+	public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
+	{
+		$scheme = $request->getUri()->getScheme();
+		$host = $request->getUri()->getHost();
 
-        /* If rules say we should not authenticate call next and return. */
-        if (false === $this->shouldAuthenticate($request)) {
-            return $handler->handle($request);
-        }
+		/* If rules say we should not authenticate call next and return. */
+		if (false === $this->shouldAuthenticate($request)) {
+			return $handler->handle($request);
+		}
 
-        /* HTTP allowed only if secure is false or server is in relaxed array. */
-        if ("https" !== $scheme && true === $this->options["secure"]) {
-            if (!in_array($host, $this->options["relaxed"])) {
-                $message = sprintf(
-                    "Insecure use of middleware over %s denied by configuration.",
-                    strtoupper($scheme)
-                );
-                throw new RuntimeException($message);
-            }
-        }
+		/* HTTP allowed only if secure is false or server is in relaxed array. */
+		if ("https" !== $scheme && true === $this->options["secure"]) {
+			if (!in_array($host, $this->options["relaxed"])) {
+				$message = sprintf(
+					"Insecure use of middleware over %s denied by configuration.",
+					strtoupper($scheme)
+				);
+				throw new RuntimeException($message);
+			}
+		}
 
-        /* If token cannot be found or decoded return with 401 Unauthorized. */
-        try {
-            $token = $this->fetchToken($request);
-            $decoded = $this->decodeToken($token);
-        } catch (RuntimeException | DomainException $exception) {
-            $response = (new ResponseFactory)->createResponse(401);
-            return $this->processError($response, [
-                "message" => $exception->getMessage(),
-                "uri" => (string)$request->getUri()
-            ]);
-        }
+		/* If token cannot be found or decoded return with 401 Unauthorized. */
+		try {
+			$token = $this->fetchToken($request);
+			$decoded = $this->decodeToken($token);
+		} catch (RuntimeException | DomainException $exception) {
+			$response = (new ResponseFactory)->createResponse(401);
+			return $this->processError($response, [
+				"message" => $exception->getMessage(),
+				"uri" => (string)$request->getUri()
+			]);
+		}
 
-        $params = [
-            "decoded" => $decoded,
-            "token" => $token,
-        ];
+		$params = [
+			"decoded" => $decoded,
+			"token" => $token,
+		];
 
-        /* Add decoded token to request as attribute when requested. */
-        if ($this->options["attribute"]) {
-            $request = $request->withAttribute($this->options["attribute"], $decoded);
-        }
+		/* Add decoded token to request as attribute when requested. */
+		if ($this->options["attribute"]) {
+			$request = $request->withAttribute($this->options["attribute"], $decoded);
+		}
 
-        /* Modify $request before calling next middleware. */
-        if (is_callable($this->options["before"])) {
-            $response = (new ResponseFactory)->createResponse(200);
-            $beforeRequest = $this->options["before"]($request, $params);
-            if ($beforeRequest instanceof ServerRequestInterface) {
-                $request = $beforeRequest;
-            }
-        }
+		/* Modify $request before calling next middleware. */
+		if (is_callable($this->options["before"])) {
+			$response = (new ResponseFactory)->createResponse(200);
+			$beforeRequest = $this->options["before"]($request, $params);
+			if ($beforeRequest instanceof ServerRequestInterface) {
+				$request = $beforeRequest;
+			}
+		}
 
-        /* Everything ok, call next middleware. */
-        $response = $handler->handle($request);
+		/* Everything ok, call next middleware. */
+		$response = $handler->handle($request);
 
-        /* Modify $response before returning. */
-        if (is_callable($this->options["after"])) {
-            $afterResponse = $this->options["after"]($response, $params);
-            if ($afterResponse instanceof ResponseInterface) {
-                return $afterResponse;
-            }
-        }
+		/* Modify $response before returning. */
+		if (is_callable($this->options["after"])) {
+			$afterResponse = $this->options["after"]($response, $params);
+			if ($afterResponse instanceof ResponseInterface) {
+				return $afterResponse;
+			}
+		}
 
-        return $response;
-    }
+		return $response;
+	}
 
-    /**
-     * Set all rules in the stack.
-     *
-     * @param RuleInterface[] $rules
-     */
-    public function withRules(array $rules): self
-    {
-        $new = clone $this;
-        /* Clear the stack */
-        unset($new->rules);
-        $new->rules = new \SplStack;
-        /* Add the rules */
-        foreach ($rules as $callable) {
-            $new = $new->addRule($callable);
-        }
-        return $new;
-    }
+	/**
+	 * Set all rules in the stack.
+	 *
+	 * @param RuleInterface[] $rules
+	 */
+	public function withRules(array $rules): self
+	{
+		$new = clone $this;
+		/* Clear the stack */
+		unset($new->rules);
+		$new->rules = new \SplStack;
+		/* Add the rules */
+		foreach ($rules as $callable) {
+			$new = $new->addRule($callable);
+		}
+		return $new;
+	}
 
-    /**
-     * Add a rule to the stack.
-     */
-    public function addRule(callable $callable): self
-    {
-        $new = clone $this;
-        $new->rules = clone $this->rules;
-        $new->rules->push($callable);
-        return $new;
-    }
+	/**
+	 * Add a rule to the stack.
+	 */
+	public function addRule(callable $callable): self
+	{
+		$new = clone $this;
+		$new->rules = clone $this->rules;
+		$new->rules->push($callable);
+		return $new;
+	}
 
-    /**
-     * Check if middleware should authenticate.
-     */
-    private function shouldAuthenticate(ServerRequestInterface $request): bool
-    {
-        /* If any of the rules in stack return false will not authenticate */
-        foreach ($this->rules as $callable) {
-            if (false === $callable($request)) {
-                return false;
-            }
-        }
-        return true;
-    }
+	/**
+	 * Check if middleware should authenticate.
+	 */
+	private function shouldAuthenticate(ServerRequestInterface $request): bool
+	{
+		/* If any of the rules in stack return false will not authenticate */
+		foreach ($this->rules as $callable) {
+			if (false === $callable($request)) {
+				return false;
+			}
+		}
+		return true;
+	}
 
-    /**
-     * Call the error handler if it exists.
-     *
-     * @param mixed[] $arguments
-     */
-    private function processError(ResponseInterface $response, array $arguments): ResponseInterface
-    {
-        if (is_callable($this->options["error"])) {
-            $handlerResponse = $this->options["error"]($response, $arguments);
-            if ($handlerResponse instanceof ResponseInterface) {
-                return $handlerResponse;
-            }
-        }
-        return $response;
-    }
+	/**
+	 * Call the error handler if it exists.
+	 *
+	 * @param mixed[] $arguments
+	 */
+	private function processError(ResponseInterface $response, array $arguments): ResponseInterface
+	{
+		if (is_callable($this->options["error"])) {
+			$handlerResponse = $this->options["error"]($response, $arguments);
+			if ($handlerResponse instanceof ResponseInterface) {
+				return $handlerResponse;
+			}
+		}
+		return $response;
+	}
 
-    /**
-     * Fetch the access token.
-     */
-    private function fetchToken(ServerRequestInterface $request): string
-    {
-        /* Check for token in header. */
-        $header = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+	/**
+	 * Fetch the access token.
+	 */
+	private function fetchToken(ServerRequestInterface $request): string
+	{
+		/* Check for token in header. */
+		$header = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
 
-        if (false === empty($header)) {
-            if (preg_match($this->options["regexp"], $header, $matches)) {
-                $this->log(LogLevel::DEBUG, "Using token from request header");
-                return $matches[1];
-            }
-        }
+		if (false === empty($header)) {
+			if (preg_match($this->options["regexp"], $header, $matches)) {
+				$this->log(LogLevel::DEBUG, "Using token from request header");
+				return $matches[1];
+			}
+		}
 
-        /* Token not found in header try a cookie. */
-        $cookieParams = $request->getCookieParams();
+		/* Token not found in header try a cookie. */
+		$cookieParams = $request->getCookieParams();
 
-        if (isset($cookieParams[$this->options["cookie"]])) {
-            $this->log(LogLevel::DEBUG, "Using token from cookie");
-            if (preg_match($this->options["regexp"], $cookieParams[$this->options["cookie"]], $matches)) {
-                return $matches[1];
-            }
-            return $cookieParams[$this->options["cookie"]];
-        };
+		if (isset($cookieParams[$this->options["cookie"]])) {
+			$this->log(LogLevel::DEBUG, "Using token from cookie");
+			if (preg_match($this->options["regexp"], $cookieParams[$this->options["cookie"]], $matches)) {
+				return $matches[1];
+			}
+			return $cookieParams[$this->options["cookie"]];
+		};
 
-        /* If everything fails log and throw. */
-        $this->log(LogLevel::WARNING, "Token not found");
-        throw new RuntimeException("Token not found.");
-    }
+		/* If everything fails log and throw. */
+		$this->log(LogLevel::WARNING, "Token not found");
+		throw new RuntimeException("Token not found.");
+	}
 
-    /**
-     * Decode the token.
-     *
-     * @return mixed[]
-     */
-    private function decodeToken(string $token): array
-    {
+	/**
+	 * Decode the token.
+	 *
+	 * @return mixed[]
+	 */
+	private function decodeToken(string $jwt): array
+	{
+		$jwtSigner = new Sha512();
+		$key = InMemory::plainText($_ENV['JWT_SECRET']);
+
+		$config = Configuration::forSymmetricSigner(
+			$jwtSigner,
+			$key
+		);
+
+		$config->setValidationConstraints(new IssuedBy($_ENV['API_DOMAIN']));			// iss
+		$config->setValidationConstraints(new PermittedFor($_ENV['API_DOMAIN']));		// aud
+		$config->setValidationConstraints(new SignedWith($jwtSigner, $key));			// signer
+		$config->setValidationConstraints(new StrictValidAt(SystemClock::fromUTC()));	// iat | nbf | exp
+
+		$token = $config->parser()->parse($jwt);
+		$constraints = $config->validationConstraints();
+
 		try {
 
-            /* Set token signer */
-            $signer = new Sha512();
+			$config->validator()->assert($token, ...$constraints);
 
-            /* Parses from a string (upgraded to Lcobucci\JWT) */
-            $token = (new Parser())->parse((string)$token);
+			$headers = $token->headers();
+			$claims = $token->claims();
 
-            /* Check the token type */
-            if ('JWT' !== $token->getHeader('typ')) {
-                throw new RuntimeException('Invalid type');
-            }
+			/* Check the token type */
+			if ('JWT' !== $headers->get('typ')) {
+				throw new RuntimeException('Invalid type');
+			}
 
-            /* Check the signature algorithm */
-            if ('HS512' !== $token->getHeader('alg')) {
-                throw new RuntimeException('Algorithm not supported');
-            }
+			/* Check the signature algorithm */
+			if ('HS512' !== $headers->get('alg')) {
+				throw new RuntimeException('Algorithm not supported');
+			}
 
-            /* Check the signature */
-            if (false === $token->verify($signer, $_ENV['JWT_SECRET'])) {
-                throw new RuntimeException('Signature verification failed');
-            }
+			$response = array_merge($headers->all(), $claims->all());
 
-            /* Check the token issuer */
-            if ($_SERVER['HTTP_HOST'] !== $token->getClaim('iss')) {
-                throw new DomainException('Invalid issuer');
-            }
+			/* Return response */
+			return $response;
 
-            /* Check the token audience */
-            if ($_SERVER['HTTP_HOST'] !== $token->getClaim('aud')) {
-                throw new DomainException('Invalid audience');
-            }
+		} catch (RequiredConstraintsViolated $e) {
+			$this->log(LogLevel::WARNING, $exception->getMessage(), [$token]);
+			throw $exception;
+		}
+	}
 
-            /* Set timestamp */
-            $timestamp = time();
+	/**
+	 * Hydrate options from given array.
+	 *
+	 * @param mixed[] $data
+	 */
+	private function hydrate(array $data = []): void
+	{
+		foreach ($data as $key => $value) {
+			/* https://github.com/facebook/hhvm/issues/6368 */
+			$key = str_replace(".", " ", $key);
+			$method = lcfirst(ucwords($key));
+			$method = str_replace(" ", "", $method);
+			if (method_exists($this, $method)) {
+				/* Try to use setter */
+				/** @phpstan-ignore-next-line */
+				call_user_func([$this, $method], $value);
+			} else {
+				/* Or fallback to setting option directly */
+				$this->options[$key] = $value;
+			}
+		}
+	}
 
-            /* Set leeway */
-            $leeway = 60;
+	/**
+	 * Set path where middleware should bind to.
+	 *
+	 * @param string|string[] $path
+	 */
+	private function path($path): void
+	{
+		$this->options["path"] = (array) $path;
+	}
 
-            /* Check if the nbf if it is defined. This is the time that the token can actually be used. If it's not yet that time, abort. */
-            if ($token->getClaim('nbf') > ($timestamp + $leeway)) {
-                throw new RuntimeException('Cannot handle token prior to ' . date(DateTime::ISO8601, $token->getClaim('nbf')));
-            }
+	/**
+	 * Set path which middleware ignores.
+	 *
+	 * @param string|string[] $ignore
+	 */
+	private function ignore($ignore): void
+	{
+		$this->options["ignore"] = (array) $ignore;
+	}
 
-            /* Check that this token has been created before 'now'. This prevents using tokens that have been created for later use (and haven't correctly used the nbf claim). */
-            if ($token->getClaim('iat') > ($timestamp + $leeway)) {
-                throw new RuntimeException('Cannot handle token prior to ' . date(DateTime::ISO8601, $token->getClaim('iat')));
-            }
+	/**
+	 * Set the cookie name where to search the token from.
+	 */
+	private function cookie(string $cookie): void
+	{
+		$this->options["cookie"] = $cookie;
+	}
 
-            /* Check if this token has expired */
-            if (($timestamp - $leeway) >= $token->getClaim('exp')) {
-                throw new RuntimeException('Expired token');
-            }
+	/**
+	 * Set the secure flag.
+	 */
+	private function secure(bool $secure): void
+	{
+		$this->options["secure"] = $secure;
+	}
 
-            /* Set response data */
-            $response = array();
-            $response['sub'] = $token->getClaim('sub');
-            $response['scope'] = $token->getClaim('scope');
-            $response['type'] = $token->getClaim('type');
+	/**
+	 * Set hosts where secure rule is relaxed.
+	 *
+	 * @param string[] $relaxed
+	 */
+	private function relaxed(array $relaxed): void
+	{
+		$this->options["relaxed"] = $relaxed;
+	}
 
-            /* Return response */
-            return $response;
+	/**
+	 * Set the secret key.
+	 *
+	 * @param string|string[] $secret
+	 */
+	private function secret($secret): void
+	{
+		if (false === is_array($secret) && false === is_string($secret) && ! $secret instanceof \ArrayAccess) {
+			throw new InvalidArgumentException(
+				'Secret must be either a string or an array of "kid" => "secret" pairs'
+			);
+		}
+		$this->options["secret"] = $secret;
+	}
 
-        } catch (RuntimeException | DomainException $exception) {
-            $this->log(LogLevel::WARNING, $exception->getMessage(), [$token]);
-            throw $exception;
-        }
-    }
+	/**
+	 * Set the error handler.
+	 */
+	private function error(callable $error): void
+	{
+		if ($error instanceof Closure) {
+			$this->options["error"] = $error->bindTo($this);
+		} else {
+			$this->options["error"] = $error;
+		}
+	}
 
-    /**
-     * Hydrate options from given array.
-     *
-     * @param mixed[] $data
-     */
-    private function hydrate(array $data = []): void
-    {
-        foreach ($data as $key => $value) {
-            /* https://github.com/facebook/hhvm/issues/6368 */
-            $key = str_replace(".", " ", $key);
-            $method = lcfirst(ucwords($key));
-            $method = str_replace(" ", "", $method);
-            if (method_exists($this, $method)) {
-                /* Try to use setter */
-                /** @phpstan-ignore-next-line */
-                call_user_func([$this, $method], $value);
-            } else {
-                /* Or fallback to setting option directly */
-                $this->options[$key] = $value;
-            }
-        }
-    }
+	/**
+	 * Set the logger.
+	 */
+	private function logger(LoggerInterface $logger = null): void
+	{
+		$this->logger = $logger;
+	}
 
-    /**
-     * Set path where middleware should bind to.
-     *
-     * @param string|string[] $path
-     */
-    private function path($path): void
-    {
-        $this->options["path"] = (array) $path;
-    }
+	/**
+	 * Logs with an arbitrary level.
+	 *
+	 * @param mixed[] $context
+	 */
+	private function log(string $level, string $message, array $context = []): void
+	{
+		if ($this->logger) {
+			$this->logger->log($level, $message, $context);
+		}
+	}
 
-    /**
-     * Set path which middleware ignores.
-     *
-     * @param string|string[] $ignore
-     */
-    private function ignore($ignore): void
-    {
-        $this->options["ignore"] = (array) $ignore;
-    }
+	/**
+	 * Set the attribute name used to attach decoded token to request.
+	 */
+	private function attribute(string $attribute): void
+	{
+		$this->options["attribute"] = $attribute;
+	}
 
-    /**
-     * Set the cookie name where to search the token from.
-     */
-    private function cookie(string $cookie): void
-    {
-        $this->options["cookie"] = $cookie;
-    }
+	/**
+	 * Set the header where token is searched from.
+	 */
+	private function header(string $header): void
+	{
+		$this->options["header"] = $header;
+	}
 
-    /**
-     * Set the secure flag.
-     */
-    private function secure(bool $secure): void
-    {
-        $this->options["secure"] = $secure;
-    }
+	/**
+	 * Set the regexp used to extract token from header or environment.
+	 */
+	private function regexp(string $regexp): void
+	{
+		$this->options["regexp"] = $regexp;
+	}
 
-    /**
-     * Set hosts where secure rule is relaxed.
-     *
-     * @param string[] $relaxed
-     */
-    private function relaxed(array $relaxed): void
-    {
-        $this->options["relaxed"] = $relaxed;
-    }
+	/**
+	 * Set the allowed algorithms
+	 *
+	 * @param string|string[] $algorithm
+	 */
+	private function algorithm($algorithm): void
+	{
+		$this->options["algorithm"] = (array) $algorithm;
+	}
 
-    /**
-     * Set the secret key.
-     *
-     * @param string|string[] $secret
-     */
-    private function secret($secret): void
-    {
-        if (false === is_array($secret) && false === is_string($secret) && ! $secret instanceof \ArrayAccess) {
-            throw new InvalidArgumentException(
-                'Secret must be either a string or an array of "kid" => "secret" pairs'
-            );
-        }
-        $this->options["secret"] = $secret;
-    }
+	/**
+	 * Set the before handler.
+	 */
 
-    /**
-     * Set the error handler.
-     */
-    private function error(callable $error): void
-    {
-        if ($error instanceof Closure) {
-            $this->options["error"] = $error->bindTo($this);
-        } else {
-            $this->options["error"] = $error;
-        }
-    }
+	private function before(callable $before): void
+	{
+		if ($before instanceof Closure) {
+			$this->options["before"] = $before->bindTo($this);
+		} else {
+			$this->options["before"] = $before;
+		}
+	}
 
-    /**
-     * Set the logger.
-     */
-    private function logger(LoggerInterface $logger = null): void
-    {
-        $this->logger = $logger;
-    }
+	/**
+	 * Set the after handler.
+	 */
+	private function after(callable $after): void
+	{
+		if ($after instanceof Closure) {
+			$this->options["after"] = $after->bindTo($this);
+		} else {
+			$this->options["after"] = $after;
+		}
+	}
 
-    /**
-     * Logs with an arbitrary level.
-     *
-     * @param mixed[] $context
-     */
-    private function log(string $level, string $message, array $context = []): void
-    {
-        if ($this->logger) {
-            $this->logger->log($level, $message, $context);
-        }
-    }
-
-    /**
-     * Set the attribute name used to attach decoded token to request.
-     */
-    private function attribute(string $attribute): void
-    {
-        $this->options["attribute"] = $attribute;
-    }
-
-    /**
-     * Set the header where token is searched from.
-     */
-    private function header(string $header): void
-    {
-        $this->options["header"] = $header;
-    }
-
-    /**
-     * Set the regexp used to extract token from header or environment.
-     */
-    private function regexp(string $regexp): void
-    {
-        $this->options["regexp"] = $regexp;
-    }
-
-    /**
-     * Set the allowed algorithms
-     *
-     * @param string|string[] $algorithm
-     */
-    private function algorithm($algorithm): void
-    {
-        $this->options["algorithm"] = (array) $algorithm;
-    }
-
-    /**
-     * Set the before handler.
-     */
-
-    private function before(callable $before): void
-    {
-        if ($before instanceof Closure) {
-            $this->options["before"] = $before->bindTo($this);
-        } else {
-            $this->options["before"] = $before;
-        }
-    }
-
-    /**
-     * Set the after handler.
-     */
-    private function after(callable $after): void
-    {
-        if ($after instanceof Closure) {
-            $this->options["after"] = $after->bindTo($this);
-        } else {
-            $this->options["after"] = $after;
-        }
-    }
-
-    /**
-     * Set the rules.
-     * @param RuleInterface[] $rules
-     */
-    private function rules(array $rules): void
-    {
-        foreach ($rules as $callable) {
-            $this->rules->push($callable);
-        }
-    }
+	/**
+	 * Set the rules.
+	 * @param RuleInterface[] $rules
+	 */
+	private function rules(array $rules): void
+	{
+		foreach ($rules as $callable) {
+			$this->rules->push($callable);
+		}
+	}
 }
