@@ -38,7 +38,12 @@ use Closure;
 use DomainException;
 use InvalidArgumentException;
 use Exception;
-use Firebase\JWT\JWT;
+use Lcobucci\JWT\Builder;
+use Lcobucci\JWT\Parser;
+use Lcobucci\JWT\Token;
+use Lcobucci\JWT\Signature;
+use Lcobucci\JWT\Signer\Hmac\Sha256;
+use Lcobucci\JWT\Signer\Hmac\Sha512;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Server\MiddlewareInterface;
@@ -253,7 +258,7 @@ final class JwtAuthentication implements MiddlewareInterface
     private function fetchToken(ServerRequestInterface $request): string
     {
         /* Check for token in header. */
-        $header = $request->getHeaderLine($this->options["header"]);
+        $header = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
 
         if (false === empty($header)) {
             if (preg_match($this->options["regexp"], $header, $matches)) {
@@ -285,14 +290,70 @@ final class JwtAuthentication implements MiddlewareInterface
      */
     private function decodeToken(string $token): array
     {
-        try {
-            $decoded = JWT::decode(
-                $token,
-                $this->options["secret"],
-                (array) $this->options["algorithm"]
-            );
-            return (array) $decoded;
-        } catch (Exception $exception) {
+		try {
+
+            /* Set token signer */
+            $signer = new Sha512();
+
+            /* Parses from a string (upgraded to Lcobucci\JWT) */
+            $token = (new Parser())->parse((string)$token);
+
+            /* Check the token type */
+            if ('JWT' !== $token->getHeader('typ')) {
+                throw new RuntimeException('Invalid type');
+            }
+
+            /* Check the signature algorithm */
+            if ('HS512' !== $token->getHeader('alg')) {
+                throw new RuntimeException('Algorithm not supported');
+            }
+
+            /* Check the signature */
+            if (false === $token->verify($signer, $_ENV['JWT_SECRET'])) {
+                throw new RuntimeException('Signature verification failed');
+            }
+
+            /* Check the token issuer */
+            if ($_SERVER['HTTP_HOST'] !== $token->getClaim('iss')) {
+                throw new DomainException('Invalid issuer');
+            }
+
+            /* Check the token audience */
+            if ($_SERVER['HTTP_HOST'] !== $token->getClaim('aud')) {
+                throw new DomainException('Invalid audience');
+            }
+
+            /* Set timestamp */
+            $timestamp = time();
+
+            /* Set leeway */
+            $leeway = 60;
+
+            /* Check if the nbf if it is defined. This is the time that the token can actually be used. If it's not yet that time, abort. */
+            if ($token->getClaim('nbf') > ($timestamp + $leeway)) {
+                throw new RuntimeException('Cannot handle token prior to ' . date(DateTime::ISO8601, $token->getClaim('nbf')));
+            }
+
+            /* Check that this token has been created before 'now'. This prevents using tokens that have been created for later use (and haven't correctly used the nbf claim). */
+            if ($token->getClaim('iat') > ($timestamp + $leeway)) {
+                throw new RuntimeException('Cannot handle token prior to ' . date(DateTime::ISO8601, $token->getClaim('iat')));
+            }
+
+            /* Check if this token has expired */
+            if (($timestamp - $leeway) >= $token->getClaim('exp')) {
+                throw new RuntimeException('Expired token');
+            }
+
+            /* Set response data */
+            $response = array();
+            $response['sub'] = $token->getClaim('sub');
+            $response['scope'] = $token->getClaim('scope');
+            $response['type'] = $token->getClaim('type');
+
+            /* Return response */
+            return $response;
+
+        } catch (RuntimeException | DomainException $exception) {
             $this->log(LogLevel::WARNING, $exception->getMessage(), [$token]);
             throw $exception;
         }
