@@ -19,7 +19,7 @@ For example implementation see [Slim API Skeleton](https://github.com/tuupola/sl
 Install latest version using [composer](https://getcomposer.org/).
 
 ``` bash
-$ composer require tuupola/slim-jwt-auth
+$ composer require beyondautomation/slim-jwt-auth
 ```
 
 If using Apache add the following to the `.htaccess` file. Otherwise PHP wont have access to `Authorization: Bearer` header.
