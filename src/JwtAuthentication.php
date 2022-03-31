@@ -334,7 +334,7 @@ final class JwtAuthentication implements MiddlewareInterface
 			/* Return response */
 			return $response;
 
-		} catch (RequiredConstraintsViolated $e) {
+		} catch (RequiredConstraintsViolated $exception) {
 			$this->log(LogLevel::WARNING, $exception->getMessage(), [$token]);
 			throw $exception;
 		}
