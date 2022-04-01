@@ -299,13 +299,16 @@ final class JwtAuthentication implements MiddlewareInterface
 		$jwtSigner = new Sha512();
 		$key = InMemory::plainText($_ENV['JWT_SECRET']);
 
-		$config = Configuration::forSymmetricSigner(
-			$jwtSigner,
-			$key
-		);
+		$config = Configuration::forSymmetricSigner($jwtSigner, $key);
+
+		$domains = explode(',', $_ENV['ALL_DOMAINS']);
 
 		$config->setValidationConstraints(new IssuedBy($_ENV['API_DOMAIN']));			// iss
-		$config->setValidationConstraints(new PermittedFor($_ENV['API_DOMAIN']));		// aud
+		if (!empty($domains)) {
+			foreach ($domains as $domain) {
+				$config->setValidationConstraints(new PermittedFor($domain));			// aud
+			}
+		}
 		$config->setValidationConstraints(new SignedWith($jwtSigner, $key));			// signer
 		$config->setValidationConstraints(new StrictValidAt(SystemClock::fromUTC()));	// iat | nbf | exp
 
