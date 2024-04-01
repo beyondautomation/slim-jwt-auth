@@ -271,12 +271,6 @@ final class JwtAuthentication implements MiddlewareInterface
 
 		if (false === empty($header)) {
 			if (preg_match($this->options["regexp"], $header, $matches)) {
-				/* Make sure token exists */
-				if (!$matches[1]) {
-					$this->log(LogLevel::WARNING, "Token not found");
-					throw new RuntimeException("Token not found.");
-				}
-
 				$this->log(LogLevel::DEBUG, "Using token from request header");
 				return $matches[1];
 			}
@@ -321,7 +315,13 @@ final class JwtAuthentication implements MiddlewareInterface
 		$config->setValidationConstraints(new SignedWith($jwtSigner, $key));			// signer
 		$config->setValidationConstraints(new StrictValidAt(SystemClock::fromUTC()));	// iat | nbf | exp
 
-		$token = $config->parser()->parse($jwt);
+		try {
+			$token = $config->parser()->parse($jwt);
+		} catch (Exception $e) {
+			$this->log(LogLevel::WARNING, "Token invalid");
+			throw new RuntimeException("Token invalid");
+		}
+
 		$constraints = $config->validationConstraints();
 
 		try {
