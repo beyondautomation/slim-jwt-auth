@@ -99,6 +99,9 @@ final class JwtAuthentication implements MiddlewareInterface
 		"cookie" => "token",
 		"attribute" => "token",
 		"path" => "/",
+		"secret" => null,
+		"iss" => null,
+		"aud" => null,
 		"ignore" => null,
 		"before" => null,
 		"after" => null,
@@ -168,7 +171,7 @@ final class JwtAuthentication implements MiddlewareInterface
 
 		$params = [
 			"decoded" => $decoded,
-			"token" => $token,
+			"token" => $token
 		];
 
 		/* Add decoded token to request as attribute when requested. */
@@ -268,6 +271,11 @@ final class JwtAuthentication implements MiddlewareInterface
 
 		if (false === empty($header)) {
 			if (preg_match($this->options["regexp"], $header, $matches)) {
+				if (!$matches[1]) {
+					$this->log(LogLevel::WARNING, "Token not found");
+					throw new RuntimeException("Token not found.");
+				}
+
 				$this->log(LogLevel::DEBUG, "Using token from request header");
 				return $matches[1];
 			}
@@ -297,13 +305,13 @@ final class JwtAuthentication implements MiddlewareInterface
 	private function decodeToken(string $jwt): array
 	{
 		$jwtSigner = new Sha512();
-		$key = InMemory::plainText($_ENV['JWT_SECRET']);
+		$key = InMemory::plainText($this->options["secret"]);
 
 		$config = Configuration::forSymmetricSigner($jwtSigner, $key);
 
-		$domains = explode(',', $_ENV['ALL_DOMAINS']);
+		$domains = explode(',', $this->options["aud"]);
 
-		$config->setValidationConstraints(new IssuedBy($_ENV['API_DOMAIN']));			// iss
+		$config->setValidationConstraints(new IssuedBy($this->options["iss"]));			// iss
 		if (!empty($domains)) {
 			foreach ($domains as $domain) {
 				$config->setValidationConstraints(new PermittedFor($domain));			// aud
