@@ -271,6 +271,7 @@ final class JwtAuthentication implements MiddlewareInterface
 
 		if (false === empty($header)) {
 			if (preg_match($this->options["regexp"], $header, $matches)) {
+				/* Make sure token exists */
 				if (!$matches[1]) {
 					$this->log(LogLevel::WARNING, "Token not found");
 					throw new RuntimeException("Token not found.");
