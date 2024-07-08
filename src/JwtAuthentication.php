@@ -91,6 +91,8 @@ final class JwtAuthentication implements MiddlewareInterface
 	 * @var mixed[]
 	 */
 	private $options = [
+		"apiTokenValid" => null,
+		"apiTokenValidMessage" => null,
 		"secure" => true,
 		"relaxed" => ["localhost", "127.0.0.1"],
 		"algorithm" => ["HS256", "HS512", "HS384"],
@@ -188,6 +190,14 @@ final class JwtAuthentication implements MiddlewareInterface
 			}
 		}
 
+		if ($this->options['apiTokenValid'] === false) {
+			$response = (new ResponseFactory)->createResponse(401);
+			return $this->processError($response, [
+				'message' => $this->options['apiTokenValidMessage'],
+				'uri' => (string)$request->getUri()
+			]);
+		}
+
 		/* Everything ok, call next middleware. */
 		$response = $handler->handle($request);
 
@@ -200,6 +210,17 @@ final class JwtAuthentication implements MiddlewareInterface
 		}
 
 		return $response;
+	}
+
+	/**
+	 * Custom function for api token validation
+	 *
+	 * @param Boolean $bool
+	 * @param String  $message
+	 */
+	public function apiTokenValid($bool, $message) {
+		$this->options['apiTokenValid'] = $bool;
+		$this->options['apiTokenValidMessage'] = $message;
 	}
 
 	/**
